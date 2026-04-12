@@ -1708,6 +1708,60 @@ class AIAgent:
             "api_mode": getattr(self, "api_mode", "") or "",
         }
 
+    @staticmethod
+    def _lookup_custom_provider_context_length(
+        config: Dict[str, Any],
+        model: str,
+        base_url: str,
+    ) -> Optional[int]:
+        """Return a named custom provider's per-model context override.
+
+        ``custom_providers[].models`` is the authoritative place for local
+        endpoint context overrides. Accept both bare IDs and vendor-prefixed
+        IDs so ``google/gemini-3-flash-preview`` still matches a custom
+        provider entry keyed by ``gemini-3-flash-preview``.
+        """
+        if not isinstance(config, dict):
+            return None
+
+        custom_providers = config.get("custom_providers")
+        normalized_base_url = (base_url or "").rstrip("/")
+        if not normalized_base_url or not isinstance(custom_providers, list):
+            return None
+
+        model_candidates: list[str] = []
+        for candidate in (
+            str(model or "").strip(),
+            str(model or "").strip().split("/", 1)[-1],
+        ):
+            if candidate and candidate not in model_candidates:
+                model_candidates.append(candidate)
+
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            entry_base_url = str(entry.get("base_url") or "").rstrip("/")
+            if entry_base_url != normalized_base_url:
+                continue
+
+            models = entry.get("models")
+            if not isinstance(models, dict):
+                return None
+
+            for candidate in model_candidates:
+                model_cfg = models.get(candidate)
+                if not isinstance(model_cfg, dict):
+                    continue
+                try:
+                    context_length = model_cfg.get("context_length")
+                    if context_length is not None:
+                        return int(context_length)
+                except (TypeError, ValueError):
+                    return None
+            return None
+
+        return None
+
     def _check_compression_model_feasibility(self) -> None:
         """Warn at session start if the auxiliary compression model's context
         window is smaller than the main model's compression threshold.
@@ -1748,10 +1802,22 @@ class AIAgent:
 
             aux_base_url = str(getattr(client, "base_url", ""))
             aux_api_key = str(getattr(client, "api_key", ""))
+            aux_config_context_length = None
+            try:
+                from hermes_cli.config import load_config as _load_config
+
+                aux_config_context_length = self._lookup_custom_provider_context_length(
+                    _load_config(),
+                    aux_model,
+                    aux_base_url,
+                )
+            except Exception:
+                aux_config_context_length = None
             aux_context = get_model_context_length(
                 aux_model,
                 base_url=aux_base_url,
                 api_key=aux_api_key,
+                config_context_length=aux_config_context_length,
             )
 
             threshold = self.context_compressor.threshold_tokens

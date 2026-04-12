@@ -100,6 +100,45 @@ def test_no_warning_when_aux_context_sufficient(mock_get_client, mock_ctx_len):
     assert agent._compression_warning is None
 
 
+@patch("hermes_cli.config.load_config")
+@patch("agent.model_metadata.get_model_context_length")
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_uses_custom_provider_context_override_for_aux_model(
+    mock_get_client,
+    mock_ctx_len,
+    mock_load_config,
+):
+    """Compression feasibility should respect custom_providers per-model context."""
+    agent = _make_agent(main_context=1_050_000, threshold_percent=0.60)
+    mock_client = MagicMock()
+    mock_client.base_url = "http://127.0.0.1:42333/gemini-cli-oauth/v1"
+    mock_client.api_key = "sk-aux"
+    mock_get_client.return_value = (mock_client, "google/gemini-3-flash-preview")
+    mock_load_config.return_value = {
+        "custom_providers": [
+            {
+                "name": "geminicli",
+                "base_url": "http://127.0.0.1:42333/gemini-cli-oauth/v1",
+                "models": {
+                    "gemini-3-flash-preview": {
+                        "context_length": 1_048_576,
+                    }
+                },
+            }
+        ]
+    }
+    mock_ctx_len.side_effect = lambda *args, **kwargs: kwargs.get("config_context_length") or 128_000
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    agent._check_compression_model_feasibility()
+
+    assert len(messages) == 0
+    assert agent._compression_warning is None
+    assert mock_ctx_len.call_args.kwargs["config_context_length"] == 1_048_576
+
+
 def test_feasibility_check_passes_live_main_runtime():
     """Compression feasibility should probe using the live session runtime."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)
